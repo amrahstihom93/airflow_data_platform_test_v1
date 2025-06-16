@@ -1,0 +1,142 @@
+version: "3.8"
+
+services:
+  postgres:
+    image: postgres:12
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+      POSTGRES_HOST_AUTH_METHOD: md5
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  minio:
+    image: minio/minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
+    volumes:
+      - minio_data:/data
+    ports:
+      - "9003:9000"
+      - "9004:9001"
+
+  airflow-init:
+    build: .
+    depends_on:
+      - postgres
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+      AIRFLOW__WEBSERVER__SECRET_KEY: 8d7f3b2c9e4a1f6d5b0c7e2a9f8b6c3d
+      JAVA_HOME: /usr/lib/jvm/java-17-openjdk-amd64
+    entrypoint: >
+      /bin/bash -c "airflow db migrate &&
+                    airflow users create --username admin --password admin --firstname admin --lastname admin --role Admin --email admin@example.com"
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/dags/scripts:/opt/airflow/dags/scripts
+      - ./airflow/plugins:/opt/airflow/plugins
+    user: "${AIRFLOW_UID}:${AIRFLOW_GID}"
+
+  airflow-webserver:
+    build: .
+    command: webserver
+    depends_on:
+      - airflow-init
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
+      AIRFLOW__WEBSERVER__SECRET_KEY: 8d7f3b2c9e4a1f6d5b0c7e2a9f8b6c3d
+      JAVA_HOME: /usr/lib/jvm/java-17-openjdk-amd64
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/dags/scripts:/opt/airflow/dags/scripts
+      - ./airflow/plugins:/opt/airflow/plugins
+    ports:
+      - "8082:8080"
+    restart: always
+
+  airflow-scheduler:
+    build: .
+    command: scheduler
+    depends_on:
+      - airflow-webserver
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
+      AIRFLOW__WEBSERVER__SECRET_KEY: 8d7f3b2c9e4a1f6d5b0c7e2a9f8b6c3d
+      JAVA_HOME: /usr/lib/jvm/java-17-openjdk-amd64
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/dags/scripts:/opt/airflow/dags/scripts
+      - ./airflow/plugins:/opt/airflow/plugins
+    restart: always
+
+  spark-master:
+    image: bitnami/spark:3.4
+    environment:
+      - SPARK_MODE=master
+      - JAVA_HOME=/opt/bitnami/java
+    ports:
+      - "7077:7077"
+      - "8088:8080"
+    volumes:
+      - ./hive/hive-site.xml:/opt/bitnami/spark/conf/hive-site.xml
+      - ./spark/warehouse:/opt/bitnami/spark/spark-warehouse
+      - ./drivers/postgresql.jar:/opt/bitnami/spark/jars/postgresql.jar
+
+
+
+  spark-worker:
+    image: bitnami/spark:3.4
+    environment:
+      - SPARK_MODE=worker
+      - SPARK_MASTER_URL=spark://spark-master:7077
+      - JAVA_HOME=/opt/bitnami/java
+    depends_on:
+      - spark-master
+    ports:
+      - "8081:8081"
+    volumes:
+      - ./hive/hive-site.xml:/opt/bitnami/spark/conf/hive-site.xml
+      - ./spark/warehouse:/opt/bitnami/spark/spark-warehouse
+      - ./drivers/postgresql.jar:/opt/bitnami/spark/jars/postgresql.jar
+
+
+  hive-metastore:
+    image: bde2020/hive:2.3.2-postgresql-metastore
+    depends_on:
+      - postgres
+    environment:
+      SERVICE_NAME: metastore
+      HIVE_METASTORE_DB_TYPE: postgres
+      HIVE_DB_USER: airflow
+      HIVE_DB_PASSWORD: airflow
+      HIVE_DB_HOST: postgres
+      HIVE_DB_NAME: airflow
+    volumes:
+      - ./hive/hive-site.xml:/opt/hive/conf/hive-site.xml
+      - ./hive/scripts:/docker-entrypoint-initdb.d
+      - ./spark/warehouse:/opt/bitnami/spark/spark-warehouse
+
+  hive-server:
+    image: bde2020/hive:2.3.2-postgresql-metastore
+    depends_on:
+      - hive-metastore
+    environment:
+      SERVICE_NAME: hiveserver2
+    volumes:
+      - ./hive/hive-site.xml:/opt/hive/conf/hive-site.xml
+      - ./spark/warehouse:/opt/bitnami/spark/spark-warehouse
+    ports:
+      - "10000:10000"
+
+volumes:
+  postgres_data:
+  minio_data:
